@@ -3,7 +3,9 @@ from .dxf_processor import detect_rooms_from_dxf
 
 from apps.rooms.models import Room
 from apps.rooms.services import classify_room
-from apps.estimates.services import generate_estimate
+
+# ✅ UPDATED: Import from enhanced services
+from apps.estimates.services_enhanced import generate_detailed_estimate
 
 
 def process_dxf_upload(upload_id):
@@ -43,8 +45,9 @@ def process_dxf_upload(upload_id):
     print(f"✅ Rooms saved: {saved}")
 
     if saved > 0:
-        generate_estimate(project.id)
-        print("💰 Estimate generated")
+        # ✅ UPDATED: Use generate_detailed_estimate instead of generate_estimate
+        generate_detailed_estimate(project.id)
+        print("💰 Detailed estimate generated")
 
     upload.processed = True
     upload.save()
