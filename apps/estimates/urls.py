@@ -1,11 +1,6 @@
 from django.urls import path
-from apps.estimates.views import (
-    GenerateEstimateAPIView,
-    project_estimate_summary,
-    download_estimate_pdf,
-)
 
-# Import enhanced views
+# Import from views_enhanced.py (the new endpoints)
 from apps.estimates.views_enhanced import (
     estimate_detailed,
     regenerate_detailed_estimate,
@@ -14,15 +9,19 @@ from apps.estimates.views_enhanced import (
     dxf_analysis_info
 )
 
+# Import from the main views.py (if you have these functions there)
+# If these don't exist in views.py, comment them out or remove them
+from apps.estimates.views import (
+    project_estimate_summary,
+    download_estimate_pdf,
+)
+
 urlpatterns = [
-    # Original endpoints
-    path(
-        "projects/<int:project_id>/generate-estimate/",
-        GenerateEstimateAPIView.as_view()
-    ),
+    # Original endpoints (from views.py)
     path(
         "projects/<int:project_id>/estimate/",
-        project_estimate_summary
+        project_estimate_summary,
+        name="project-estimate-summary"
     ),
     path(
         "projects/<int:project_id>/estimate/download-pdf/",
@@ -30,25 +29,30 @@ urlpatterns = [
         name="download-estimate-pdf"
     ),
     
-    # Enhanced endpoints
+    # Enhanced endpoints (from views_enhanced.py)
     path(
         'projects/<int:project_id>/estimate-detailed/', 
-        estimate_detailed
+        estimate_detailed,
+        name="estimate-detailed"
     ),
     path(
         'projects/<int:project_id>/regenerate-estimate/', 
-        regenerate_detailed_estimate
+        regenerate_detailed_estimate,
+        name="regenerate-estimate"
     ),
     path(
         'projects/<int:project_id>/estimate-by-category/', 
-        estimate_by_category
+        estimate_by_category,
+        name="estimate-by-category"
     ),
     path(
         'projects/<int:project_id>/estimate/download-excel/', 
-        download_estimate_excel
+        download_estimate_excel,
+        name="download-estimate-excel"
     ),
     path(
         'projects/<int:project_id>/dxf-analysis/', 
-        dxf_analysis_info
+        dxf_analysis_info,
+        name="dxf-analysis"
     ),
 ]
