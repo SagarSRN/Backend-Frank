@@ -87,6 +87,15 @@ STATIC_URL = "static/"
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
+# REST Framework Settings - IMPORTANT FOR ERROR MESSAGES
+REST_FRAMEWORK = {
+    'EXCEPTION_HANDLER': 'rest_framework.views.exception_handler',
+    'DEFAULT_RENDERER_CLASSES': [
+        'rest_framework.renderers.JSONRenderer',
+        'rest_framework.renderers.BrowsableAPIRenderer',
+    ],
+}
+
 # CORS Settings - Allow all for development
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
@@ -102,7 +111,7 @@ CORS_ALLOW_HEADERS = [
     'user-agent',
     'x-csrftoken',
     'x-requested-with',
-    'cache-control',  # IMPORTANT: Fix for CORS error
+    'cache-control',
     'pragma',
     'expires',
 ]
@@ -114,13 +123,20 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10 MB
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# Logging configuration
+# Logging configuration - ENHANCED FOR DEBUGGING
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '{levelname} {asctime} {module} {message}',
+            'style': '{',
+        },
+    },
     'handlers': {
         'console': {
             'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
         },
     },
     'root': {
@@ -128,7 +144,22 @@ LOGGING = {
         'level': 'INFO',
     },
     'loggers': {
+        'django': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'django.request': {
+            'handlers': ['console'],
+            'level': 'DEBUG',  # Show full request errors
+            'propagate': False,
+        },
         'apps.uploads': {
+            'handlers': ['console'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
+        'apps.projects': {
             'handlers': ['console'],
             'level': 'DEBUG',
             'propagate': False,
