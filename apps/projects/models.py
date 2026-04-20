@@ -13,7 +13,7 @@ class Project(models.Model):
     ]
     
     name = models.CharField(max_length=200)
-    location = models.CharField(max_length=200)
+    location = models.CharField(max_length=200, blank=True, default='')
     project_type = models.CharField(
         max_length=20,
         choices=PROJECT_TYPES,
@@ -58,27 +58,3 @@ class Project(models.Model):
         if self.is_retail:
             return self.retail_components.count()
         return 0
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

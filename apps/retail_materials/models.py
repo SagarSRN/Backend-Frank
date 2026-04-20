@@ -1,242 +1,225 @@
+"""
+Retail Materials Models
+Handles material categories, materials, retail estimates, and components
+"""
 
 from django.db import models
+from decimal import Decimal
 from apps.projects.models import Project
 
 
 class MaterialCategory(models.Model):
-    """
-    Material categories for retail displays
-    """
+    """Categories for organizing materials"""
     
     CATEGORY_TYPES = [
         ('SHEET', 'Sheet Materials'),
         ('LIGHTING', 'Lighting'),
         ('HARDWARE', 'Hardware'),
-        ('LABOR', 'Labor & Fabrication'),
         ('FINISHING', 'Finishing'),
+        ('LABOR', 'Labor'),
     ]
     
     name = models.CharField(max_length=100)
     category_type = models.CharField(max_length=20, choices=CATEGORY_TYPES)
     description = models.TextField(blank=True)
-    display_order = models.IntegerField(default=0)
-    is_active = models.BooleanField(default=True)
     
     class Meta:
-        ordering = ['display_order', 'name']
-        verbose_name = "Material Category"
         verbose_name_plural = "Material Categories"
+        ordering = ['category_type', 'name']
     
     def __str__(self):
-        return f"{self.name} ({self.get_category_type_display()})"
+        return self.name
 
 
 class Material(models.Model):
-    """
-    Individual materials with rates
-    """
+    """Materials used in retail displays"""
     
-    UNIT_CHOICES = [
-        ('sqft', 'Square Feet'),
-        ('meter', 'Meter'),
-        ('piece', 'Piece'),
-        ('unit', 'Unit'),
-        ('hour', 'Hour'),
-        ('liter', 'Liter'),
-        ('kg', 'Kilogram'),
-    ]
-    
-    category = models.ForeignKey(
-        MaterialCategory,
-        on_delete=models.CASCADE,
-        related_name='materials'
-    )
     name = models.CharField(max_length=100)
-    specification = models.CharField(max_length=100, blank=True)
-    unit = models.CharField(max_length=20, choices=UNIT_CHOICES)
-    rate = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        help_text="Rate in ₹"
-    )
-    notes = models.TextField(blank=True)
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-    
-    # DXF Layer mapping (for auto-detection)
-    dxf_layer_names = models.TextField(
+    category = models.ForeignKey(MaterialCategory, on_delete=models.CASCADE, related_name='materials')
+    unit = models.CharField(max_length=20, default='sqft')
+    rate = models.DecimalField(max_digits=10, decimal_places=2)
+    specification = models.TextField(blank=True)
+    dxf_layer_keywords = models.TextField(
         blank=True,
-        help_text="Comma-separated layer names (e.g., MDF_18MM, MDF18, PANEL_MDF)"
+        help_text="Comma-separated keywords for DXF layer matching"
     )
     
     class Meta:
-        ordering = ['category', 'name', 'specification']
-        verbose_name = "Material"
-        verbose_name_plural = "Materials"
+        ordering = ['category', 'name']
     
     def __str__(self):
-        if self.specification:
-            return f"{self.name} {self.specification} - ₹{self.rate}/{self.unit}"
         return f"{self.name} - ₹{self.rate}/{self.unit}"
-    
-    @property
-    def layer_list(self):
-        """Get list of layer names"""
-        if self.dxf_layer_names:
-            return [l.strip() for l in self.dxf_layer_names.split(',')]
-        return []
 
 
-class Component(models.Model):
-    """
-    Components detected/added to retail display projects
-    """
-    
-    COMPONENT_TYPES = [
-        ('PANEL', 'Panel'),
-        ('SHELF', 'Shelf'),
-        ('LIGHTING', 'Lighting'),
-        ('HARDWARE', 'Hardware'),
-        ('CUSTOM', 'Custom'),
-    ]
+class RetailEstimate(models.Model):
+    """Retail display estimate for a project"""
     
     project = models.ForeignKey(
         Project,
         on_delete=models.CASCADE,
-        related_name='retail_components'
-    )
-    component_type = models.CharField(max_length=20, choices=COMPONENT_TYPES)
-    material = models.ForeignKey(
-        Material,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='components'
-    )
-    description = models.CharField(max_length=200)
-    quantity = models.DecimalField(max_digits=10, decimal_places=2)
-    unit = models.CharField(max_length=20)
-    
-    # Optional dimensions (stored as JSON)
-    dimensions = models.JSONField(
-        blank=True,
-        null=True,
-        help_text="Store length, width, height if applicable"
+        related_name='retail_estimates'
     )
     
-    # DXF metadata
-    layer_name = models.CharField(max_length=100, blank=True)
-    auto_detected = models.BooleanField(default=False)
-    
-    created_at = models.DateTimeField(auto_now_add=True)
-    
-    class Meta:
-        ordering = ['component_type', 'description']
-        verbose_name = "Component"
-        verbose_name_plural = "Components"
-    
-    def __str__(self):
-        return f"{self.description} ({self.quantity} {self.unit})"
-    
-    @property
-    def rate(self):
-        """Get rate from material"""
-        if self.material:
-            return self.material.rate
-        return 0
-    
-    @property
-    def amount(self):
-        """Calculate total amount"""
-        return float(self.quantity) * float(self.rate)
-
-
-class RetailEstimate(models.Model):
-    """
-    Bill of Quantities for retail display projects
-    """
-    
-    project = models.OneToOneField(
-        Project,
-        on_delete=models.CASCADE,
-        related_name='retail_estimate'
+    material_cost = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00')
     )
     
-    # Cost breakdown
-    material_cost = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    labor_cost = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    labor_cost = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00')
+    )
     
-    # Tax
+    overhead_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal('15.00')
+    )
+    
+    profit_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal('10.00')
+    )
+    
     gst_percentage = models.DecimalField(
         max_digits=5,
         decimal_places=2,
-        default=18.00,
-        help_text="GST percentage"
+        default=Decimal('18.00')
     )
-    gst_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     
-    # Total
-    total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    overhead_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00')
+    )
     
-    # Additional info
-    notes = models.TextField(blank=True)
-    validity_days = models.IntegerField(default=30, help_text="Quote validity in days")
+    profit_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00')
+    )
+    
+    subtotal = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00')
+    )
+    
+    gst_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00')
+    )
+    
+    total = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00')
+    )
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
-        verbose_name = "Retail Estimate"
-        verbose_name_plural = "Retail Estimates"
+        ordering = ['-created_at']
     
     def __str__(self):
-        return f"Retail Estimate - {self.project.name} (₹{self.total})"
+        return f"Estimate for {self.project.name} - ₹{self.total}"
     
     def calculate_totals(self):
-        """
-        Calculate all totals from components
-        """
-        components = self.project.retail_components.all()
+        """Calculate all totals and save"""
         
-        # Separate material and labor costs
-        material_total = 0
-        labor_total = 0
+        # Calculate overhead
+        base_cost = self.material_cost + self.labor_cost
+        self.overhead_amount = base_cost * (self.overhead_percentage / Decimal('100'))
         
-        for component in components:
-            if component.material:
-                if component.material.category.category_type == 'LABOR':
-                    labor_total += component.amount
-                else:
-                    material_total += component.amount
+        # Calculate subtotal before profit
+        subtotal_before_profit = base_cost + self.overhead_amount
         
-        self.material_cost = material_total
-        self.labor_cost = labor_total
-        self.subtotal = material_total + labor_total
-        self.gst_amount = self.subtotal * (self.gst_percentage / 100)
+        # Calculate profit
+        self.profit_amount = subtotal_before_profit * (self.profit_percentage / Decimal('100'))
+        
+        # Calculate subtotal (before GST)
+        self.subtotal = subtotal_before_profit + self.profit_amount
+        
+        # Calculate GST
+        self.gst_amount = self.subtotal * (self.gst_percentage / Decimal('100'))
+        
+        # Calculate total
         self.total = self.subtotal + self.gst_amount
         
         self.save()
-        return self.total
     
-    def get_components_by_category(self):
-        """
-        Group components by material category
-        """
-        from collections import defaultdict
+    def save(self, *args, **kwargs):
+        """Override save to auto-calculate totals"""
         
-        grouped = defaultdict(list)
+        # Only auto-calculate if not explicitly disabled
+        skip_calculation = kwargs.pop('skip_calculation', False)
         
-        for component in self.project.retail_components.select_related('material__category'):
-            if component.material:
-                category_name = component.material.category.name
-                grouped[category_name].append({
-                    'description': component.description,
-                    'quantity': component.quantity,
-                    'unit': component.unit,
-                    'rate': component.rate,
-                    'amount': component.amount,
-                })
+        if not skip_calculation:
+            # Calculate overhead
+            base_cost = self.material_cost + self.labor_cost
+            self.overhead_amount = base_cost * (self.overhead_percentage / Decimal('100'))
+            
+            # Calculate subtotal before profit
+            subtotal_before_profit = base_cost + self.overhead_amount
+            
+            # Calculate profit
+            self.profit_amount = subtotal_before_profit * (self.profit_percentage / Decimal('100'))
+            
+            # Calculate subtotal (before GST)
+            self.subtotal = subtotal_before_profit + self.profit_amount
+            
+            # Calculate GST
+            self.gst_amount = self.subtotal * (self.gst_percentage / Decimal('100'))
+            
+            # Calculate total
+            self.total = self.subtotal + self.gst_amount
         
-        return dict(grouped)
+        super().save(*args, **kwargs)
+
+
+class Component(models.Model):
+    """Individual component in a retail estimate"""
+    
+    estimate = models.ForeignKey(
+        RetailEstimate,
+        on_delete=models.CASCADE,
+        related_name='components'
+    )
+    
+    material = models.ForeignKey(
+        Material,
+        on_delete=models.PROTECT,
+        related_name='components'
+    )
+    
+    description = models.CharField(max_length=200)
+    quantity = models.DecimalField(max_digits=10, decimal_places=2)
+    unit = models.CharField(max_length=20)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['material__category', 'description']
+    
+    def __str__(self):
+        return f"{self.description} - {self.quantity} {self.unit}"
+    
+    @property
+    def rate(self):
+        """Get rate from material"""
+        return self.material.rate
+    
+    @property
+    def amount(self):
+        """Calculate amount (quantity × rate)"""
+        return self.quantity * self.material.rate
+    
+    @property
+    def material_spec(self):
+        """Get material specification"""
+        return self.material.specification

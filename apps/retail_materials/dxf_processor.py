@@ -1,434 +1,370 @@
 """
-IMPROVED Retail Display DXF Processor
-- Better scale detection
-- Fallback materials for unmapped layers
-- More accurate quantity calculations
-Location: backend/apps/retail_materials/dxf_processor.py
+DXF File Processor for Retail Display Estimation
+SMART VERSION: Separates LED INSERT blocks from METAL layer
 """
+
 import ezdxf
-from shapely.geometry import Point, Polygon, LineString
 import logging
-from collections import defaultdict
+from decimal import Decimal
+from django.db import transaction
+from .models import RetailEstimate, Component, Material, MaterialCategory
 
 logger = logging.getLogger(__name__)
 
 
-def analyze_retail_display_dxf(file_path, material_mapping=None):
-    """Analyze retail display DXF and extract components"""
-    try:
-        doc = ezdxf.readfile(file_path)
-        logger.info(f"✓ Opened DXF file: {file_path}")
-        
-        components = []
-        
-        # Extract by layer
-        layer_stats = extract_by_layers(doc)
-        logger.info(f"Found {len(layer_stats)} layers")
-        
-        # Extract text labels
-        text_labels = extract_text_labels(doc)
-        logger.info(f"Found {len(text_labels)} text labels")
-        
-        # Detect scale
-        scale_factor = detect_scale_factor(layer_stats)
-        print(f"\n🔍 SCALE DETECTION: Using {scale_factor}x multiplier")
-        
-        # Print layers
-        print("\n" + "="*80)
-        print("📋 LAYERS FOUND IN DXF:")
-        print("="*80)
-        for layer_name in layer_stats.keys():
-            print(f"  • {layer_name}")
-        print("="*80 + "\n")
-        
-        # Print mapping
-        if material_mapping:
-            print("="*80)
-            print("🗺️  MATERIAL MAPPING AVAILABLE:")
-            print("="*80)
-            for layer_key, material in material_mapping.items():
-                print(f"  '{layer_key}' → {material.name} {material.specification}")
-            print("="*80 + "\n")
-        
-        # Create fallback materials dict for unmapped layers
-        fallback_materials = create_fallback_materials()
-        
-        # Process each layer
-        for layer_name, layer_data in layer_stats.items():
-            print(f"\n📋 Processing layer: {layer_name}")
-            
-            # Try to match material
-            material = match_material(layer_name, material_mapping, fallback_materials)
-            
-            if material:
-                if hasattr(material, 'name'):
-                    print(f"  ✅ MATCHED: '{layer_name}' → {material.name}")
-                else:
-                    print(f"  ⚠️  FALLBACK: '{layer_name}' → {material['name']}")
-            else:
-                print(f"  ⚠️  NO MATCH: '{layer_name}'")
-            
-            # Detect component type
-            component_type = detect_component_type(layer_name, layer_data)
-            print(f"  📦 Type: {component_type}")
-            
-            # Extract components
-            layer_components = extract_layer_components(
-                layer_name,
-                layer_data,
-                component_type,
-                material,
-                scale_factor
-            )
-            
-            if layer_components:
-                print(f"  ✅ Extracted {len(layer_components)} component(s)")
-                for comp in layer_components:
-                    print(f"     - {comp['description']}: {comp['quantity']} {comp['unit']}")
-            else:
-                print(f"  ⚠️  No components extracted")
-            
-            components.extend(layer_components)
-        
-        print("\n" + "="*80)
-        print(f"🎉 TOTAL: {len(components)} components extracted")
-        print("="*80)
-        
-        # Print summary
-        if components:
-            print("\n📊 COMPONENT SUMMARY:")
-            print("="*80)
-            total_value = 0
-            for i, comp in enumerate(components, 1):
-                if comp.get('material'):
-                    if hasattr(comp['material'], 'name'):
-                        mat_name = comp['material'].name
-                        rate = float(comp['material'].rate) if hasattr(comp['material'], 'rate') else 0
-                    else:
-                        mat_name = comp['material']['name']
-                        rate = comp['material'].get('rate', 0)
-                    value = float(comp['quantity']) * rate
-                    total_value += value
-                else:
-                    mat_name = 'NO MATERIAL'
-                    rate = 0
-                    value = 0
-                
-                print(f"{i}. {comp['description']}")
-                print(f"   Quantity: {comp['quantity']} {comp['unit']}")
-                print(f"   Material: {mat_name}")
-                print(f"   Rate: ₹{rate}")
-                print(f"   Value: ₹{value:,.2f}")
-                print()
-            
-            print(f"💰 ESTIMATED TOTAL: ₹{total_value:,.2f}")
-        else:
-            print("\n⚠️  WARNING: No components extracted!")
-        
-        print("="*80 + "\n")
-        
-        return components
-        
-    except Exception as e:
-        logger.error(f"Error analyzing DXF: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        raise
+class DXFProcessor:
+    """Process DXF files and generate retail estimates"""
 
+    def __init__(self, dxf_path, project):
+        self.dxf_path = dxf_path
+        self.project = project
+        self.doc = None
+        self.components = []
 
-def detect_scale_factor(layer_stats):
-    """
-    Detect appropriate scale factor based on geometry sizes
-    Returns multiplier for area calculations
-    """
-    all_areas = []
-    for layer_data in layer_stats.values():
-        if layer_data['polygons']:
-            all_areas.extend([p.area for p in layer_data['polygons']])
-    
-    if all_areas:
-        avg_area = sum(all_areas) / len(all_areas)
-        max_area = max(all_areas)
-        
-        print(f"  Average polygon area: {avg_area:.2f}")
-        print(f"  Max polygon area: {max_area:.2f}")
-        
-        # Typical gondola panel: 4ft x 8ft = 32 sqft = 2.97 m²
-        # In mm²: 2,970,000 mm²
-        # If we're seeing areas in millions, we're in mm²
-        
-        if avg_area > 100000:  # Likely mm²
-            # Convert mm² to sqft: 1 mm² = 0.0000107639 sqft
-            # But this seems too aggressive, let's use 10x scale
-            return 10.0
-        elif avg_area > 1000:  # Likely inches²
-            return 1.0
-        else:  # Already in feet or meters
-            return 1.0
-    
-    return 1.0
-
-
-def create_fallback_materials():
-    """
-    Create fallback materials for common unmapped layers
-    These have default rates for estimation
-    """
-    return {
-        'METAL': {
-            'name': 'Metal Frame',
-            'rate': 50,  # ₹50 per piece
-            'unit': 'piece',
-            'type': 'HARDWARE'
-        },
-        'HARDWARE': {
-            'name': 'Hardware Misc',
-            'rate': 10,  # ₹10 per piece
-            'unit': 'piece',
-            'type': 'HARDWARE'
-        },
-        'STEEL': {
-            'name': 'Steel Frame',
-            'rate': 75,  # ₹75 per piece
-            'unit': 'piece',
-            'type': 'HARDWARE'
-        },
-        'GLASS': {
-            'name': 'Glass Panel',
-            'rate': 500,  # ₹500 per sqft
-            'unit': 'sqft',
-            'type': 'PANEL'
-        },
-    }
-
-
-def match_material(layer_name, material_mapping, fallback_materials):
-    """
-    Match layer to material with smart fallbacks
-    """
-    if not material_mapping:
-        # Check fallback
-        layer_upper = layer_name.upper()
-        for key, fallback in fallback_materials.items():
-            if key in layer_upper:
-                return fallback
-        return None
-    
-    layer_upper = layer_name.upper()
-    
-    # Try exact match
-    if layer_upper in material_mapping:
-        return material_mapping[layer_upper]
-    
-    # Try partial match
-    for map_key, material in material_mapping.items():
-        if map_key in layer_upper or layer_upper in map_key:
-            return material
-    
-    # Try word match
-    layer_words = set(layer_upper.split())
-    for map_key, material in material_mapping.items():
-        key_words = set(map_key.split())
-        if layer_words & key_words:
-            return material
-    
-    # Check fallback materials
-    for key, fallback in fallback_materials.items():
-        if key in layer_upper:
-            return fallback
-    
-    return None
-
-
-def extract_by_layers(doc):
-    """Group entities by layer"""
-    msp = doc.modelspace()
-    layer_stats = defaultdict(lambda: {
-        'entities': [],
-        'entity_types': defaultdict(int),
-        'total_length': 0,
-        'total_area': 0,
-        'polygons': [],
-        'lines': [],
-    })
-    
-    for entity in msp:
+    def process(self):
+        """Main processing method"""
         try:
-            layer = entity.dxf.layer
-            entity_type = entity.dxftype()
+            # Load DXF file
+            self.doc = ezdxf.readfile(self.dxf_path)
+            self.msp = self.doc.modelspace()
+
+            # Extract components from layers
+            self._extract_components()
+
+            # Create estimate
+            estimate = self._create_estimate()
+
+            return estimate
+
+        except Exception as e:
+            raise Exception(f"DXF Processing Error: {str(e)}")
+
+    def _extract_components(self):
+        """Extract components from DXF layers"""
+
+        # Get all layers in the DXF
+        layers = {}
+        
+        # SPECIAL: Track INSERT blocks separately
+        metal_inserts = []
+
+        for entity in self.msp:
+            layer_name = entity.dxf.layer
             
-            layer_stats[layer]['entities'].append(entity)
-            layer_stats[layer]['entity_types'][entity_type] += 1
+            # Skip dimension and utility layers
+            if any(skip in layer_name.upper() for skip in ['DIM', 'DIMENSION', 'HATCH', 'PDF', 'LEADER', '0', 'DEFPOINTS', 'BY OTHERS']):
+                continue
             
-            if entity_type == 'LWPOLYLINE':
-                pts = [(p[0], p[1]) for p in entity.get_points()]
-                if len(pts) >= 3:
-                    try:
-                        poly = Polygon(pts)
-                        if poly.is_valid and poly.area > 0:
-                            layer_stats[layer]['polygons'].append(poly)
-                            layer_stats[layer]['total_area'] += poly.area
-                    except:
-                        pass
-            
-            elif entity_type == 'LINE':
+            logger.info(f"🔍 Processing layer: '{layer_name}' (type: {entity.dxftype()})")
+
+            if layer_name not in layers:
+                layers[layer_name] = {
+                    'entities': [],
+                    'total_length': 0,
+                    'total_area': 0,
+                    'count': 0,
+                    'polylines': [],
+                    'inserts': []
+                }
+
+            layers[layer_name]['entities'].append(entity)
+            layers[layer_name]['count'] += 1
+
+            # SMART DETECTION: Separate INSERT blocks on METAL layer
+            if entity.dxftype() == 'INSERT' and layer_name.upper() == 'METAL':
+                metal_inserts.append(entity)
+                logger.info(f"  📌 LED INSERT detected on METAL layer (will be treated as LED)")
+                continue  # Don't count INSERT in METAL layer calculations
+
+            # Calculate dimensions based on entity type
+            if entity.dxftype() == 'LINE':
                 start = entity.dxf.start
                 end = entity.dxf.end
-                line = LineString([(start.x, start.y), (end.x, end.y)])
-                layer_stats[layer]['lines'].append(line)
-                layer_stats[layer]['total_length'] += line.length
+                length = ((end[0] - start[0])**2 + (end[1] - start[1])**2)**0.5
+                layers[layer_name]['total_length'] += length
+
+            elif entity.dxftype() in ['LWPOLYLINE', 'POLYLINE']:
+                layers[layer_name]['polylines'].append(entity)
+                
+                # Calculate polyline length AND area
+                points = list(entity.get_points()) if hasattr(entity, 'get_points') else []
+                
+                if len(points) >= 2:
+                    # Calculate perimeter
+                    total_length = 0
+                    for i in range(len(points) - 1):
+                        p1, p2 = points[i], points[i+1]
+                        length = ((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)**0.5
+                        total_length += 1
+                    
+                    layers[layer_name]['total_length'] += total_length
+                    
+                    # Calculate area if closed polyline (shoelace formula)
+                    if entity.is_closed or (len(points) >= 3 and points[0] == points[-1]):
+                        area = self._calculate_polygon_area(points)
+                        layers[layer_name]['total_area'] += abs(area)
+
+            elif entity.dxftype() == 'INSERT':
+                # Block references (LED lights, hardware, etc.) - NOT on METAL layer
+                layers[layer_name]['inserts'].append(entity)
+                logger.info(f"  📌 INSERT entity found on '{layer_name}' layer")
+
+            elif entity.dxftype() in ['CIRCLE', 'ARC']:
+                radius = entity.dxf.radius
+                if entity.dxftype() == 'CIRCLE':
+                    area = 3.14159 * radius * radius
+                    circumference = 2 * 3.14159 * radius
+                    layers[layer_name]['total_area'] += area
+                    layers[layer_name]['total_length'] += circumference
+                else:
+                    # Arc
+                    start_angle = entity.dxf.start_angle
+                    end_angle = entity.dxf.end_angle
+                    angle_range = abs(end_angle - start_angle)
+                    arc_length = (angle_range / 360) * 2 * 3.14159 * radius
+                    layers[layer_name]['total_length'] += arc_length
+
+        # SMART: Create a virtual LED layer for INSERT blocks found on METAL
+        if metal_inserts:
+            logger.info(f"\n💡 SMART DETECTION: Found {len(metal_inserts)} LED INSERT blocks on METAL layer")
+            logger.info(f"   Creating virtual 'LED 4600K' layer for these blocks")
             
-            elif entity_type == 'POLYLINE':
-                try:
-                    pts = [(p[0], p[1]) for p in entity.points()]
-                    if len(pts) >= 2:
-                        line = LineString(pts)
-                        layer_stats[layer]['lines'].append(line)
-                        layer_stats[layer]['total_length'] += line.length
-                except:
-                    pass
+            layers['LED 4600K'] = {
+                'entities': metal_inserts,
+                'total_length': 0,
+                'total_area': 0,
+                'count': len(metal_inserts),
+                'polylines': [],
+                'inserts': metal_inserts
+            }
+
+        # Log summary
+        logger.info(f"\n📊 LAYER SUMMARY:")
+        for layer_name, layer_data in layers.items():
+            logger.info(f"  Layer '{layer_name}':")
+            logger.info(f"    Entities: {layer_data['count']}")
+            logger.info(f"    INSERTs: {len(layer_data['inserts'])}")
+            logger.info(f"    Length: {layer_data['total_length']:.2f}mm")
+            logger.info(f"    Area: {layer_data['total_area']:.2f}mm²")
+
+        # Convert layers to components
+        for layer_name, layer_data in layers.items():
+            self._create_component_from_layer(layer_name, layer_data)
+
+    def _calculate_polygon_area(self, points):
+        """Calculate area of polygon using shoelace formula"""
+        if len(points) < 3:
+            return 0
         
-        except Exception as e:
-            continue
-    
-    return dict(layer_stats)
+        area = 0
+        for i in range(len(points) - 1):
+            x1, y1 = points[i][0], points[i][1]
+            x2, y2 = points[i+1][0], points[i+1][1]
+            area += (x1 * y2) - (x2 * y1)
+        
+        # Close the polygon if not already closed
+        if points[0] != points[-1]:
+            x1, y1 = points[-1][0], points[-1][1]
+            x2, y2 = points[0][0], points[0][1]
+            area += (x1 * y2) - (x2 * y1)
+        
+        return abs(area) / 2
 
+    def _create_component_from_layer(self, layer_name, layer_data):
+        """Create component from layer data"""
 
-def extract_text_labels(doc):
-    """Extract text labels"""
-    msp = doc.modelspace()
-    labels = []
-    
-    for entity in msp:
-        try:
-            if entity.dxftype() in ['TEXT', 'MTEXT']:
-                text = entity.plain_text().strip()
-                if text:
-                    pos = entity.dxf.insert if hasattr(entity.dxf, 'insert') else None
-                    if pos:
-                        labels.append({
-                            'text': text,
-                            'position': Point(pos.x, pos.y),
-                            'layer': entity.dxf.layer
-                        })
-        except:
-            continue
-    
-    return labels
+        logger.info(f"\n🔧 Creating component for layer: '{layer_name}'")
 
+        # Find matching material
+        material = self._find_material_for_layer(layer_name)
 
-def detect_component_type(layer_name, layer_data):
-    """Detect component type"""
-    layer_upper = layer_name.upper()
-    
-    if any(k in layer_upper for k in ['MDF', 'ACRYLIC', 'PLYWOOD', 'PANEL', 'WOOD', 'GLASS']):
-        return 'PANEL'
-    elif any(k in layer_upper for k in ['SHELF', 'SHELVES']):
-        return 'SHELF'
-    elif any(k in layer_upper for k in ['LED', 'LIGHT', 'LIGHTING']):
-        return 'LIGHTING'
-    elif any(k in layer_upper for k in ['BRACKET', 'HANDLE', 'HINGE', 'HARDWARE', 'METAL', 'STEEL']):
-        return 'HARDWARE'
-    elif layer_data['entity_types'].get('LWPOLYLINE', 0) > 0:
-        avg_area = layer_data['total_area'] / max(len(layer_data['polygons']), 1)
-        return 'PANEL' if avg_area > 1000 else 'SHELF'
-    elif layer_data['entity_types'].get('LINE', 0) > 5:
-        return 'LIGHTING'
-    
-    return 'CUSTOM'
+        if not material:
+            # Create generic material if no match
+            logger.warning(f"  ⚠️ No material matched for '{layer_name}', creating generic")
+            material = self._create_generic_material(layer_name)
 
+        # Calculate quantity based on material unit
+        quantity = self._calculate_quantity(material, layer_data)
 
-def extract_layer_components(layer_name, layer_data, component_type, material, scale_factor):
-    """Extract components with improved calculations"""
-    components = []
-    
-    # Get material info
-    if material:
-        if hasattr(material, 'name'):
-            mat_name = material.name
-            mat_spec = getattr(material, 'specification', '')
+        logger.info(f"  ✅ Material: {material.name} ({material.unit})")
+        logger.info(f"  ✅ Quantity: {quantity} {material.unit}")
+        logger.info(f"  ✅ Rate: ₹{material.rate}/{material.unit}")
+
+        if quantity > 0:
+            component_data = {
+                'layer_name': layer_name,
+                'material': material,
+                'quantity': quantity,
+                'entity_count': layer_data['count'],
+                'total_length': layer_data['total_length'],
+                'total_area': layer_data['total_area']
+            }
+            self.components.append(component_data)
         else:
-            mat_name = material['name']
-            mat_spec = ''
-    else:
-        mat_name = layer_name
-        mat_spec = ''
-    
-    if component_type == 'PANEL':
-        if layer_data['polygons']:
-            total_area_raw = sum(p.area for p in layer_data['polygons'])
+            logger.warning(f"  ⚠️ Quantity is 0, component NOT created!")
+
+    def _find_material_for_layer(self, layer_name):
+        """Find best matching material for a layer"""
+        
+        logger.info(f"  🔍 Looking for material match for '{layer_name}'")
+
+        layer_lower = layer_name.lower().strip()
+        layer_upper = layer_name.upper().strip()
+
+        # Try exact match first (case-insensitive)
+        materials = Material.objects.all()
+        
+        for material in materials:
+            if not material.dxf_layer_keywords:
+                continue
             
-            # Apply scale factor and convert to sqft
-            total_area_sqft = (total_area_raw * scale_factor * 0.0000107639)
+            keywords = [k.strip() for k in material.dxf_layer_keywords.split(',')]
             
-            if total_area_sqft > 0.1:
-                components.append({
-                    'type': 'PANEL',
-                    'description': f"{mat_name} {mat_spec} Panel".strip(),
-                    'quantity': round(total_area_sqft, 2),
-                    'unit': 'sqft',
-                    'material': material,
-                    'dimensions': {'count': len(layer_data['polygons'])},
-                    'layer': layer_name,
-                    'auto_detected': True
-                })
-    
-    elif component_type == 'SHELF':
-        shelf_count = len(layer_data['polygons'])
-        if shelf_count > 0:
-            components.append({
-                'type': 'SHELF',
-                'description': f"{mat_name} Shelf",
-                'quantity': shelf_count,
-                'unit': 'piece',
-                'material': material,
-                'dimensions': {'count': shelf_count},
-                'layer': layer_name,
-                'auto_detected': True
-            })
-    
-    elif component_type == 'LIGHTING':
-        if layer_data['total_length'] > 0:
-            length_meters = layer_data['total_length'] / 1000
+            for keyword in keywords:
+                keyword_lower = keyword.lower()
+                
+                # Exact match
+                if keyword_lower == layer_lower:
+                    logger.info(f"  ✅ EXACT MATCH! '{layer_name}' → {material.name}")
+                    return material
+                
+                # Contains match
+                if keyword_lower in layer_lower or layer_lower in keyword_lower:
+                    logger.info(f"  ✅ CONTAINS MATCH! '{layer_name}' → {material.name}")
+                    return material
+
+        logger.warning(f"  ❌ NO MATCH found for '{layer_name}'")
+        return None
+
+    def _create_generic_material(self, layer_name):
+        """Create a generic material for unmatched layers"""
+
+        # Get or create "Other Materials" category
+        category, _ = MaterialCategory.objects.get_or_create(
+            name='Other Materials',
+            defaults={
+                'category_type': 'SHEET',
+                'description': 'Unmatched materials from DXF'
+            }
+        )
+
+        # Create generic material
+        material, created = Material.objects.get_or_create(
+            name=f'Generic - {layer_name}',
+            category=category,
+            defaults={
+                'unit': 'sqft',
+                'rate': Decimal('1.00'),  # ₹1 to identify unmatched
+                'specification': f'Generic material for layer: {layer_name}',
+                'dxf_layer_keywords': layer_name
+            }
+        )
+
+        return material
+
+    def _calculate_quantity(self, material, layer_data):
+        """Calculate quantity based on material unit type"""
+
+        unit = material.unit.lower()
+
+        logger.info(f"    Calculating quantity for unit: {unit}")
+        logger.info(f"    Layer data: length={layer_data['total_length']:.2f}mm, area={layer_data['total_area']:.2f}mm², inserts={len(layer_data['inserts'])}, count={layer_data['count']}")
+
+        if unit in ['meter', 'm', 'linear']:
+            # Convert mm to meters (DXF is usually in mm)
+            quantity = round(layer_data['total_length'] / 1000, 2)
+            logger.info(f"    → {layer_data['total_length']:.2f}mm / 1000 = {quantity} meters")
+            return quantity
+
+        elif unit in ['sqft', 'sq ft', 'square feet']:
+            # Convert mm² to sqft (1 sqft = 92903 mm²)
+            area_sqft = layer_data['total_area'] / 92903.04
+            quantity = round(area_sqft, 2)
+            logger.info(f"    → {layer_data['total_area']:.2f}mm² / 92903.04 = {quantity} sqft")
+            return quantity
+
+        elif unit in ['piece', 'pcs', 'unit']:
+            # Count INSERT entities (blocks) or total entities
+            insert_count = len(layer_data.get('inserts', []))
+            if insert_count > 0:
+                logger.info(f"    → {insert_count} INSERT entities = {insert_count} pieces")
+                return insert_count
+            else:
+                logger.info(f"    → {layer_data['count']} total entities = {layer_data['count']} pieces")
+                return layer_data['count']
+
+        else:
+            # Default to area calculation
+            area_sqft = layer_data['total_area'] / 92903.04
+            if area_sqft > 0:
+                quantity = round(area_sqft, 2)
+                logger.info(f"    → Default area: {quantity} sqft")
+                return quantity
+            else:
+                # Fallback to count for piece-based materials
+                logger.info(f"    → Fallback count: {layer_data['count']} pieces")
+                return layer_data['count']
+
+    @transaction.atomic
+    def _create_estimate(self):
+        """Create RetailEstimate and Components in database"""
+
+        # Create estimate
+        estimate = RetailEstimate.objects.create(
+            project=self.project,
+            material_cost=Decimal('0.00'),
+            labor_cost=Decimal('0.00'),
+            overhead_percentage=Decimal('15.00'),
+            profit_percentage=Decimal('10.00'),
+            gst_percentage=Decimal('18.00')
+        )
+
+        # Create components
+        total_material_cost = Decimal('0.00')
+
+        logger.info(f"\n💾 Creating {len(self.components)} components in database:")
+
+        for comp_data in self.components:
+            component = Component.objects.create(
+                estimate=estimate,
+                material=comp_data['material'],
+                description=f"{comp_data['material'].name} - {comp_data['layer_name']}",
+                quantity=Decimal(str(comp_data['quantity'])),
+                unit=comp_data['material'].unit
+            )
+
+            # Component.rate and Component.amount are @property
+            # They auto-calculate from material.rate * quantity
+            total_material_cost += component.amount
             
-            if length_meters > 0.1:
-                components.append({
-                    'type': 'LIGHTING',
-                    'description': f"{mat_name}",
-                    'quantity': round(length_meters, 2),
-                    'unit': 'meter',
-                    'material': material,
-                    'dimensions': {'length': length_meters},
-                    'layer': layer_name,
-                    'auto_detected': True
-                })
-    
-    elif component_type == 'HARDWARE':
-        # For hardware, use reasonable count based on entities
-        entity_count = len(layer_data['entities'])
-        if entity_count > 0:
-            # Reduce count - likely not 900+ individual pieces
-            reasonable_count = min(entity_count, 50)  # Cap at 50
-            
-            components.append({
-                'type': 'HARDWARE',
-                'description': f"{mat_name}",
-                'quantity': reasonable_count,
-                'unit': 'piece',
-                'material': material,
-                'dimensions': {'count': entity_count},
-                'layer': layer_name,
-                'auto_detected': True
-            })
-    
-    return components
+            logger.info(f"  ✓ {comp_data['material'].name}: {comp_data['quantity']} {comp_data['material'].unit} × ₹{comp_data['material'].rate} = ₹{component.amount}")
+
+        # Update estimate costs
+        estimate.material_cost = total_material_cost
+        estimate.labor_cost = total_material_cost * Decimal('0.30')  # 30% of material
+        estimate.save()
+
+        # This triggers the estimate's save() method which calculates totals
+        estimate.calculate_totals()
+
+        logger.info(f"\n📊 ESTIMATE SUMMARY:")
+        logger.info(f"  Material Cost: ₹{estimate.material_cost:,.2f}")
+        logger.info(f"  Labor Cost: ₹{estimate.labor_cost:,.2f}")
+        logger.info(f"  Total: ₹{estimate.total:,.2f}")
+
+        return estimate
 
 
-def get_dxf_layers(file_path):
-    """Get list of all layers"""
-    try:
-        doc = ezdxf.readfile(file_path)
-        return [{'name': layer.dxf.name} for layer in doc.layers]
-    except Exception as e:
-        logger.error(f"Error reading layers: {e}")
-        return []
+def process_dxf_file(dxf_path, project):
+    """
+    Main function to process DXF file and create estimate
+
+    Args:
+        dxf_path: Path to DXF file
+        project: Project instance
+
+    Returns:
+        RetailEstimate instance
+    """
+    processor = DXFProcessor(dxf_path, project)
+    return processor.process()
